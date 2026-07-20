@@ -1,5 +1,5 @@
 param(
-    [string]$BotUrl = "http://localhost:3978",
+    [string]$BotUrl = "https://botend.beedie.ca",
     [string]$ChannelId = "msteams",
     [string]$UserId = "sim-user-001",
     [string]$UserName = "Simulated User",
@@ -9,10 +9,40 @@ param(
     [string]$BotId = "28:d4c09dd1-ab88-4b8c-9a98-3199b8519fb8",
     [string]$BotName = "ACP Bot",
     [string]$Question,
+    [switch]$Cloudflare,
     [switch]$Verbose
 )
 
 $ErrorActionPreference = "Stop"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Load .env file for Cloudflare credentials
+# ──────────────────────────────────────────────────────────────────────────────
+$cfClientId = $null
+$cfClientSecret = $null
+
+if ($Cloudflare) {
+    $envFile = Join-Path (Split-Path $PSCommandPath -Parent) ".env"
+    if (Test-Path $envFile) {
+        Get-Content $envFile | ForEach-Object {
+            if ($_ -match '^CF_ACCESS_CLIENT_ID=(.+)$') {
+                $cfClientId = $matches[1]
+            }
+            if ($_ -match '^CF_ACCESS_CLIENT_SECRET=(.+)$') {
+                $cfClientSecret = $matches[1]
+            }
+        }
+        if (-not $cfClientId -or -not $cfClientSecret) {
+            Write-Host "Error: Cloudflare credentials not found in .env file" -ForegroundColor Red
+            Write-Host "Please set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "Cloudflare Access enabled" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "Warning: .env file not found; Cloudflare headers will not be included" -ForegroundColor Yellow
+    }
+}
 
 # Default to interactive chat mode when no Question is supplied
 $Interactive = [string]::IsNullOrWhiteSpace($Question)
@@ -87,11 +117,21 @@ function Send-BotActivity {
         Write-Host "[DEBUG] Body: $body" -ForegroundColor DarkGray
     }
 
+    $headers = @{
+        "Content-Type" = "application/json"
+    }
+
+    # Add Cloudflare Access headers if enabled
+    if ($Cloudflare -and $cfClientId -and $cfClientSecret) {
+        $headers["CF-Access-Client-Id"] = $cfClientId
+        $headers["CF-Access-Client-Secret"] = $cfClientSecret
+    }
+
     $response = Invoke-WebRequest `
-        -Uri         $DevMessagesEndpoint `
-        -Method      POST `
-        -ContentType "application/json" `
-        -Body        $body `
+        -Uri     $DevMessagesEndpoint `
+        -Method  POST `
+        -Headers $headers `
+        -Body    $body `
         -ErrorAction Stop
 
     return $response
@@ -111,7 +151,13 @@ Write-Host "──────────────────────�
 Write-Host ""
 Write-Host "Checking bot health..." -ForegroundColor Yellow
 try {
-    $health = Invoke-RestMethod -Uri $HealthEndpoint -Method GET -ErrorAction Stop
+    $headers = @{}
+    if ($Cloudflare -and $cfClientId -and $cfClientSecret) {
+        $headers["CF-Access-Client-Id"] = $cfClientId
+        $headers["CF-Access-Client-Secret"] = $cfClientSecret
+    }
+    
+    $health = Invoke-RestMethod -Uri $HealthEndpoint -Method GET -Headers $headers -ErrorAction Stop
     $wsStatus = if ($health.wsReady) { "connected" } else { "not connected" }
     Write-Host "  status   : $($health.status)" -ForegroundColor Green
     Write-Host "  wsReady  : $wsStatus" -ForegroundColor $(if ($health.wsReady) { "Green" } else { "Red" })
