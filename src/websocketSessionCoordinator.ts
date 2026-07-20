@@ -112,6 +112,9 @@ export class WebSocketSessionCoordinator {
     }
 
     try {
+      // Ensure the conversation key exists in the store before we update it
+      this.sessionStore.getOrCreate(conversationKey);
+
       const result = await this.manager.sessionNew(cwd);
       const sessionId = result.sessionId;
 

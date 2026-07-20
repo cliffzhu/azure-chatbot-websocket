@@ -106,13 +106,95 @@ docker compose up -d --build
 curl http://localhost:3978/healthz
 ```
 
-After local verification succeeds:
+After local verification succeeds, follow the HTTPS setup below before updating Azure Bot Service.
 
-1. Deploy your bot container to your hosting environment.
-2. Expose an HTTPS endpoint for bot messages, for example:
-	- https://bot.company.com/api/messages
-3. Confirm health probe endpoint is reachable, for example:
-	- https://bot.company.com/healthz
+---
+
+## Expose HTTPS with a Reverse Proxy
+
+Azure Bot Service requires a valid public HTTPS endpoint. The container itself listens on HTTP port 3978. A reverse proxy handles TLS termination in front of it.
+
+### Option A — Caddy (recommended, auto HTTPS)
+
+Install Caddy on the host VM, then create `/etc/caddy/Caddyfile`:
+
+```
+bot.company.com {
+    reverse_proxy localhost:3978
+}
+```
+
+Start Caddy:
+
+```bash
+sudo systemctl enable --now caddy
+```
+
+Caddy automatically obtains and renews a Let's Encrypt certificate. No further TLS configuration needed.
+
+### Option B — nginx + Certbot
+
+```bash
+# Install nginx and certbot
+sudo apt install nginx certbot python3-certbot-nginx -y
+
+# Obtain certificate (replace with your domain)
+sudo certbot --nginx -d bot.company.com
+```
+
+Create `/etc/nginx/sites-available/bot`:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name bot.company.com;
+
+    # certbot fills these in automatically
+    ssl_certificate     /etc/letsencrypt/live/bot.company.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bot.company.com/privkey.pem;
+
+    location / {
+        proxy_pass         http://localhost:3978;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection keep-alive;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+
+# Redirect HTTP → HTTPS
+server {
+    listen 80;
+    server_name bot.company.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+Enable and reload:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/bot /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Certbot auto-renewal is configured by default; confirm with:
+
+```bash
+sudo certbot renew --dry-run
+```
+
+### Verify HTTPS is working
+
+```bash
+curl https://bot.company.com/healthz
+# Expected: {"status":"ok","wsReady":true}
+```
+
+Once HTTPS responds correctly, proceed to update the Azure Bot Service endpoint.
+
+---
 
 ## Cut Over Azure AI Bot Service Endpoint
 After your self-hosted endpoint is verified, update Azure AI Bot Service:
