@@ -6,11 +6,14 @@ import {
   TurnContext
 } from "botbuilder";
 import { config } from "./config";
+import { payloadLogger } from "./logger";
 import { SessionStore } from "./sessionStore";
 import { WebSocketManager } from "./websocketManager";
 import { WebSocketSessionCoordinator } from "./websocketSessionCoordinator";
 
 const app = express();
+app.use(express.json());
+app.use(payloadLogger);
 const sessionStore = new SessionStore();
 
 // Initialize WebSocket components
@@ -146,6 +149,123 @@ app.post("/api/messages", (req, res) => {
     }
   });
 });
+
+// ─── Dev-only simulation endpoint (no Bot Framework auth) ───────────────────
+// Enabled when NODE_ENV=development. Accepts a plain JSON body:
+//   { "text": "...", "conversationId": "...", "userId": "...", "channelId": "..." }
+// Returns: { "text": "..." }
+// NOT available in production.
+if (process.env.NODE_ENV === "development") {
+  app.post("/api/simulate", async (req, res) => {
+    const userText       = (req.body?.text ?? "").trim();
+    const conversationId = (req.body?.conversationId ?? "sim-default").trim();
+    const userId         = (req.body?.userId ?? "sim-user").trim();
+    const channelId      = (req.body?.channelId ?? "simulation").trim();
+    const conversationKey = `${channelId}|${conversationId}|${userId}`;
+
+    if (!userText) {
+      res.status(400).json({ error: "text is required" });
+      return;
+    }
+
+    try {
+      if (!wsInitialized) {
+        await ensureWebSocketReady();
+      }
+
+      if (!wsCoordinator) {
+        throw new Error("WebSocket coordinator not initialized");
+      }
+
+      const sessionId = await wsCoordinator.ensureSession(conversationKey);
+      const response  = await wsCoordinator.sendMessage(conversationKey, sessionId, userText);
+
+      let replyText = response.text;
+      if (!replyText) {
+        replyText = response.hasErrors
+          ? `Error: ${response.error?.message ?? "Unknown error"}`
+          : `(${response.stopReason})`;
+      }
+
+      res.status(200).json({ text: replyText, stopReason: response.stopReason });
+    } catch (error) {
+      console.error("Simulation endpoint error", { error, conversationKey });
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // ─── Dev endpoint for full Bot Framework Activities (no JWT required) ──────────
+  // Accepts complete Activity objects as sent by Teams (for realistic simulation)
+  // Returns: { "text": "..." }
+  app.post("/api/dev/messages", async (req, res) => {
+    const activity = req.body;
+
+    if (!activity?.type) {
+      res.status(400).json({ error: "Activity type is required" });
+      return;
+    }
+
+    // Handle ConversationUpdate (member join/leave)
+    if (activity.type === "conversationUpdate") {
+      console.log(`[DEV] ConversationUpdate: ${activity.conversation?.id}`);
+      res.status(200).json({ text: "Conversation updated" });
+      return;
+    }
+
+    // Handle EndOfConversation (close)
+    if (activity.type === "endOfConversation") {
+      console.log(`[DEV] EndOfConversation: ${activity.conversation?.id}`);
+      res.status(200).json({ text: "Conversation ended" });
+      return;
+    }
+
+    // Handle Message
+    if (activity.type !== "message") {
+      res.status(400).json({ error: `Unsupported activity type: ${activity.type}` });
+      return;
+    }
+
+    const userText = (activity.text ?? "").trim();
+    if (!userText) {
+      res.status(400).json({ error: "Message text is required" });
+      return;
+    }
+
+    const channelId    = activity.channelId ?? "msteams";
+    const conversationId = activity.conversation?.id ?? "dev-conversation";
+    const userId       = activity.from?.id ?? "dev-user";
+    const conversationKey = `${channelId}|${conversationId}|${userId}`;
+
+    try {
+      if (!wsInitialized) {
+        await ensureWebSocketReady();
+      }
+
+      if (!wsCoordinator) {
+        throw new Error("WebSocket coordinator not initialized");
+      }
+
+      const sessionId = await wsCoordinator.ensureSession(conversationKey);
+      const response  = await wsCoordinator.sendMessage(conversationKey, sessionId, userText);
+
+      let replyText = response.text;
+      if (!replyText) {
+        replyText = response.hasErrors
+          ? `Error: ${response.error?.message ?? "Unknown error"}`
+          : `(${response.stopReason})`;
+      }
+
+      res.status(200).json({ text: replyText, stopReason: response.stopReason });
+    } catch (error) {
+      console.error("[DEV] Message endpoint error", { error, conversationKey });
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  console.log("DEV mode: full Activity endpoint enabled at POST /api/dev/messages");
+}
 
 // Graceful shutdown
 process.on("SIGTERM", async () => {
