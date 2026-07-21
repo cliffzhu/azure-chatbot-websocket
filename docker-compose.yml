@@ -8,6 +8,8 @@ services:
     image: azure-chatbot-websocket:local
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "3978:3978"
     volumes:
