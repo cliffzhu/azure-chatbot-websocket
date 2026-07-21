@@ -6,6 +6,7 @@ import {
   TurnContext
 } from "botbuilder";
 import { config } from "./config";
+import { jwtAuthMiddleware } from "./jwtAuthMiddleware";
 import { payloadLogger } from "./logger";
 import { SessionStore } from "./sessionStore";
 import { WebSocketManager } from "./websocketManager";
@@ -21,15 +22,67 @@ let wsManager: WebSocketManager | null = null;
 let wsCoordinator: WebSocketSessionCoordinator | null = null;
 let wsInitialized = false;
 
-const botFrameworkAuthentication = new ConfigurationBotFrameworkAuthentication(
-  process.env as Record<string, string>
-);
-const adapter = new CloudAdapter(botFrameworkAuthentication);
+let adapter: CloudAdapter | null = null;
 
-adapter.onTurnError = async (context: TurnContext, err: Error) => {
-  console.error("Unhandled bot error", err);
-  await context.sendActivity("Something went wrong. Please try again.");
+if (!config.jwtOnlyAuthEnabled) {
+  const botFrameworkAuthentication = new ConfigurationBotFrameworkAuthentication(
+    process.env as Record<string, string>
+  );
+  adapter = new CloudAdapter(botFrameworkAuthentication);
+
+  adapter.onTurnError = async (context: TurnContext, err: Error) => {
+    console.error("Unhandled bot error", err);
+    await context.sendActivity("Something went wrong. Please try again.");
+  };
+}
+
+type MessageRoutingInput = {
+  channelId: string;
+  conversationId: string;
+  userId: string;
+  userText: string;
 };
+
+async function routeMessageToBackend(input: MessageRoutingInput): Promise<{ text: string; stopReason: string }> {
+  const conversationKey = `${input.channelId}|${input.conversationId}|${input.userId}`;
+
+  if (!input.userText) {
+    return {
+      text: "Please send a message.",
+      stopReason: "validation"
+    };
+  }
+
+  // Ensure WebSocket is ready
+  if (!wsInitialized) {
+    await ensureWebSocketReady();
+  }
+
+  if (!wsCoordinator) {
+    throw new Error("WebSocket coordinator not initialized");
+  }
+
+  // Ensure session exists for this conversation
+  const sessionId = await wsCoordinator.ensureSession(conversationKey);
+
+  // Send message to backend and get buffered response
+  const response = await wsCoordinator.sendMessage(conversationKey, sessionId, input.userText);
+
+  // Format user-friendly response message
+  let replyMessage = response.text;
+  if (!replyMessage) {
+    if (response.hasErrors) {
+      replyMessage = `Error: ${response.error?.message || "Unknown error"}`;
+    } else {
+      replyMessage = `Response received (${response.stopReason})`;
+    }
+  }
+
+  return {
+    text: replyMessage,
+    stopReason: response.stopReason
+  };
+}
 
 /**
  * Initialize WebSocket connection on first use
@@ -84,7 +137,61 @@ app.get(config.healthEndpointPath, (_req, res) => {
   });
 });
 
+app.use(jwtAuthMiddleware);
+
 app.post("/api/messages", (req, res) => {
+  if (config.jwtOnlyAuthEnabled) {
+    const activity = req.body;
+
+    if (!activity?.type) {
+      res.status(400).json({ error: "Activity type is required" });
+      return;
+    }
+
+    if (activity.type === "conversationUpdate") {
+      console.log(`[JWT-ONLY] ConversationUpdate: ${activity.conversation?.id}`);
+      res.status(200).json({ text: "Conversation updated" });
+      return;
+    }
+
+    if (activity.type === "endOfConversation") {
+      console.log(`[JWT-ONLY] EndOfConversation: ${activity.conversation?.id}`);
+      res.status(200).json({ text: "Conversation ended" });
+      return;
+    }
+
+    if (activity.type !== "message") {
+      res.status(400).json({ error: `Unsupported activity type: ${activity.type}` });
+      return;
+    }
+
+    const userText = (activity.text ?? "").trim();
+    const channelId = activity.channelId ?? "msteams";
+    const conversationId = activity.conversation?.id ?? "jwt-only-conversation";
+    const userId = activity.from?.id ?? "jwt-only-user";
+
+    routeMessageToBackend({ channelId, conversationId, userId, userText })
+      .then((reply) => {
+        res.status(200).json({ text: reply.text, stopReason: reply.stopReason });
+      })
+      .catch((error) => {
+        console.error("[JWT-ONLY] Message endpoint error", {
+          error,
+          channelId,
+          conversationId,
+          userId
+        });
+        const message = error instanceof Error ? error.message : String(error);
+        res.status(500).json({ error: message });
+      });
+    return;
+  }
+
+  if (!adapter) {
+    res.status(500).json({ error: "CloudAdapter not initialized" });
+    return;
+  }
+
   adapter.process(req, res, async (context) => {
     if (context.activity.type !== ActivityTypes.Message) {
       return;
@@ -95,44 +202,21 @@ app.post("/api/messages", (req, res) => {
     const userId = context.activity.from?.id ?? "unknown-user";
     const userText = (context.activity.text ?? "").trim();
 
-    const conversationKey = `${channelId}|${conversationId}|${userId}`;
-
-    if (!userText) {
-      await context.sendActivity("Please send a message.");
-      return;
-    }
-
     try {
-      // Ensure WebSocket is ready
-      if (!wsInitialized) {
-        await ensureWebSocketReady();
-      }
+      const reply = await routeMessageToBackend({
+        channelId,
+        conversationId,
+        userId,
+        userText
+      });
 
-      if (!wsCoordinator) {
-        throw new Error("WebSocket coordinator not initialized");
-      }
-
-      // Ensure session exists for this conversation
-      const sessionId = await wsCoordinator.ensureSession(conversationKey);
-
-      // Send message to backend and get buffered response
-      const response = await wsCoordinator.sendMessage(conversationKey, sessionId, userText);
-
-      // Format user-friendly response message
-      let replyMessage = response.text;
-      if (!replyMessage) {
-        if (response.hasErrors) {
-          replyMessage = `Error: ${response.error?.message || "Unknown error"}`;
-        } else {
-          replyMessage = `Response received (${response.stopReason})`;
-        }
-      }
-
-      await context.sendActivity(replyMessage);
+      await context.sendActivity(reply.text);
     } catch (error) {
       console.error("Backend communication failed", {
         error,
-        conversationKey
+        channelId,
+        conversationId,
+        userId
       });
 
       // Determine error message
