@@ -87,6 +87,7 @@ export class WebSocketManager {
         this.ws.on("close", () => {
           this.isConnected = false;
           console.log("WebSocket disconnected");
+          this.emit("disconnected", {});
         });
 
         this.ws.on("error", (error: Error) => {
