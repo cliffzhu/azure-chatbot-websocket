@@ -108,6 +108,31 @@ curl http://localhost:3978/healthz
 
 After local verification succeeds, follow the HTTPS setup below before updating Azure Bot Service.
 
+## Endpoint Behavior
+
+The service exposes two message endpoints with different purposes:
+
+1. `POST /api/messages`
+- Production endpoint for Bot Framework channels.
+- Uses Bot Framework auth (or JWT-only mode when `JWT_ONLY_AUTH_ENABLED=true`).
+- Sends replies as Bot Framework activities via `context.sendActivity(...)`.
+
+2. `POST /api/dev/messages` (development only)
+- Enabled only when `NODE_ENV=development`.
+- Intended for realistic local/integration simulation using full Activity payloads.
+- Message activities are routed through the same backend conversation logic.
+
+Important note:
+- Bot Framework/Web Chat clients render outgoing activities, not arbitrary HTTP JSON bodies.
+- If you test with Web Chat/DirectLine style traffic, prefer endpoint behavior that emits activities via adapter/context.
+
+## Outgoing Reply Logging
+
+Use `OUTGOING_ACTIVITY_LOG_ENABLED` to control verbose outgoing channel-send logs:
+
+- `true` (default): logs send attempt/success/failure for CloudAdapter paths.
+- `false`: suppresses attempt/success logs while still logging failures.
+
 ---
 
 ## Expose HTTPS with a Reverse Proxy

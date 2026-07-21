@@ -32,7 +32,11 @@ if (!config.jwtOnlyAuthEnabled) {
 
   adapter.onTurnError = async (context: TurnContext, err: Error) => {
     console.error("Unhandled bot error", err);
-    await context.sendActivity("Something went wrong. Please try again.");
+    await sendActivityWithLog(
+      context,
+      "Something went wrong. Please try again.",
+      "api/messages"
+    );
   };
 }
 
@@ -42,6 +46,53 @@ type MessageRoutingInput = {
   userId: string;
   userText: string;
 };
+
+async function sendActivityWithLog(
+  context: TurnContext,
+  text: string,
+  source: "api/messages" | "api/dev/messages",
+  stopReason?: string
+): Promise<void> {
+  const channelId = context.activity.channelId ?? "unknown-channel";
+  const conversationId = context.activity.conversation?.id ?? "unknown-conversation";
+  const userId = context.activity.from?.id ?? "unknown-user";
+
+  if (config.outgoingActivityLogEnabled) {
+    console.info("[outgoing] sendActivity attempt", {
+      source,
+      channelId,
+      conversationId,
+      userId,
+      textLength: text.length,
+      stopReason: stopReason ?? "n/a"
+    });
+  }
+
+  try {
+    await context.sendActivity(text);
+    if (config.outgoingActivityLogEnabled) {
+      console.info("[outgoing] sendActivity success", {
+        source,
+        channelId,
+        conversationId,
+        userId,
+        textLength: text.length,
+        stopReason: stopReason ?? "n/a"
+      });
+    }
+  } catch (error) {
+    console.error("[outgoing] sendActivity failed", {
+      source,
+      channelId,
+      conversationId,
+      userId,
+      textLength: text.length,
+      stopReason: stopReason ?? "n/a",
+      error
+    });
+    throw error;
+  }
+}
 
 async function routeMessageToBackend(input: MessageRoutingInput): Promise<{ text: string; stopReason: string }> {
   const conversationKey = `${input.channelId}|${input.conversationId}|${input.userId}`;
@@ -82,6 +133,10 @@ async function routeMessageToBackend(input: MessageRoutingInput): Promise<{ text
     text: replyMessage,
     stopReason: response.stopReason
   };
+}
+
+async function buildConversationReply(input: MessageRoutingInput): Promise<{ text: string; stopReason: string }> {
+  return routeMessageToBackend(input);
 }
 
 /**
@@ -210,7 +265,12 @@ app.post("/api/messages", (req, res) => {
         userText
       });
 
-      await context.sendActivity(reply.text);
+      await sendActivityWithLog(
+        context,
+        reply.text,
+        "api/messages",
+        reply.stopReason
+      );
     } catch (error) {
       console.error("Backend communication failed", {
         error,
@@ -229,7 +289,11 @@ app.post("/api/messages", (req, res) => {
         }
       }
 
-      await context.sendActivity(errorMessage);
+      await sendActivityWithLog(
+        context,
+        errorMessage,
+        "api/messages"
+      );
     }
   });
 });
@@ -306,6 +370,11 @@ if (process.env.NODE_ENV === "development") {
 
     // Handle Message
     if (activity.type !== "message") {
+      if (activity.type === "typing") {
+        res.status(200).json({});
+        return;
+      }
+
       res.status(400).json({ error: `Unsupported activity type: ${activity.type}` });
       return;
     }
@@ -320,6 +389,43 @@ if (process.env.NODE_ENV === "development") {
     const conversationId = activity.conversation?.id ?? "dev-conversation";
     const userId       = activity.from?.id ?? "dev-user";
     const conversationKey = `${channelId}|${conversationId}|${userId}`;
+
+    if (adapter) {
+      adapter.process(req, res, async (context) => {
+        if (context.activity.type !== ActivityTypes.Message) {
+          return;
+        }
+
+        try {
+          const reply = await buildConversationReply({
+            channelId,
+            conversationId,
+            userId,
+            userText
+          });
+
+          await sendActivityWithLog(
+            context,
+            reply.text,
+            "api/dev/messages",
+            reply.stopReason
+          );
+        } catch (error) {
+          console.error("[DEV] Message endpoint error", {
+            error,
+            conversationKey
+          });
+
+          const message = error instanceof Error ? error.message : String(error);
+          await sendActivityWithLog(
+            context,
+            message,
+            "api/dev/messages"
+          );
+        }
+      });
+      return;
+    }
 
     try {
       if (!wsInitialized) {
