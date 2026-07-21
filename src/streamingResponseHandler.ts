@@ -38,6 +38,21 @@ export class StreamingResponseHandler {
         this.handleSessionError(update);
         break;
 
+      case "available_commands_update":
+        // Backend sends available commands after session creation
+        console.log("Available commands updated:", update.content?.commands);
+        break;
+
+      case "config_option_update":
+        // Backend sends config options after session creation
+        console.log("Config option updated:", update.content?.option);
+        break;
+
+      case "tool_call_update":
+        // Backend sends intermediate tool call updates
+        console.log("Tool call update:", update.content);
+        break;
+
       default:
         console.warn(`Unknown session update type: ${(update as any).sessionUpdate}`);
     }

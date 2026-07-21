@@ -173,6 +173,14 @@ async function ensureWebSocketReady(): Promise<void> {
     await wsManager.connect();
     await wsCoordinator.initialize(wsManager);
 
+    // Listen for disconnection to reset initialization flag
+    wsManager.on("disconnected", () => {
+      console.log("WebSocket disconnected, will reconnect on next message");
+      wsInitialized = false;
+      wsManager = null;
+      wsCoordinator = null;
+    });
+
     wsInitialized = true;
     console.log("WebSocket coordinator initialized and ready");
   } catch (error) {

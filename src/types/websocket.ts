@@ -116,11 +116,16 @@ export interface SessionUpdate {
     | "agent_message_completion"
     | "tool_call"
     | "session_state_change"
-    | "session_error";
+    | "session_error"
+    | "available_commands_update"
+    | "config_option_update"
+    | "tool_call_update";
   content?: {
     type: "text" | "json" | "image" | "audio";
     text?: string;
     json?: any;
+    commands?: any[];
+    option?: any;
   };
   error?: {
     code: string;
