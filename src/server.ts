@@ -21,6 +21,7 @@ const sessionStore = new SessionStore();
 let wsManager: WebSocketManager | null = null;
 let wsCoordinator: WebSocketSessionCoordinator | null = null;
 let wsInitialized = false;
+let wsConnectingPromise: Promise<void> | null = null;
 
 let adapter: CloudAdapter | null = null;
 
@@ -104,8 +105,8 @@ async function routeMessageToBackend(input: MessageRoutingInput): Promise<{ text
     };
   }
 
-  // Ensure WebSocket is ready
-  if (!wsInitialized) {
+  // Ensure WebSocket is ready and connected
+  if (!wsInitialized || !wsCoordinator?.isReady()) {
     await ensureWebSocketReady();
   }
 
@@ -140,48 +141,66 @@ async function buildConversationReply(input: MessageRoutingInput): Promise<{ tex
 }
 
 /**
- * Initialize WebSocket connection on first use
+ * Initialize or reconnect the WebSocket on demand.
+ * Serialized via wsConnectingPromise so concurrent callers all wait for the same attempt.
  */
 async function ensureWebSocketReady(): Promise<void> {
-  if (wsInitialized) {
+  // Already ready — fast path
+  if (wsInitialized && wsCoordinator?.isReady()) {
     return;
   }
 
-  try {
-    wsManager = new WebSocketManager({
-      url: config.websocketUrl,
-      username: config.websocketUser,
-      authToken: config.websocketAuthToken,
-      connectTimeoutMs: config.websocketConnectTimeoutMs
-    });
-
-    wsCoordinator = new WebSocketSessionCoordinator(sessionStore);
-
-    // Register permission request handler
-    // For now, deny all permission requests by default (secure approach)
-    // In production, this could integrate with Teams to prompt the user
-    wsCoordinator.onPermissionRequest(async (request) => {
-      console.log(`Permission requested: ${request.permission}`);
-      console.log(`Description: ${request.description || "(none)"}`);
-
-      // Deny by default for security
-      // This can be customized to approve specific permissions or integrate with user UI
-      return "denied";
-    });
-
-    // Connect and initialize
-    await wsManager.connect();
-    await wsCoordinator.initialize(wsManager);
-
-    wsInitialized = true;
-    console.log("WebSocket coordinator initialized and ready");
-  } catch (error) {
-    console.error("Failed to initialize WebSocket coordinator:", error);
-    wsInitialized = false;
-    wsManager = null;
-    wsCoordinator = null;
-    throw error;
+  // Serialize concurrent callers onto a single reconnect attempt
+  if (wsConnectingPromise) {
+    return wsConnectingPromise;
   }
+
+  wsConnectingPromise = (async () => {
+    try {
+      if (wsInitialized && wsManager && wsCoordinator) {
+        // Manager + coordinator already exist (background reconnect loop is active).
+        // Short-circuit: connect immediately and re-run the handshake.
+        console.log("WebSocket not ready — reconnecting on demand...");
+        await wsManager.connect();
+        await wsCoordinator.reInitializeHandshake();
+        console.log("WebSocket reconnected on demand");
+      } else {
+        // First-time initialization
+        wsManager = new WebSocketManager({
+          url: config.websocketUrl,
+          username: config.websocketUser,
+          authToken: config.websocketAuthToken,
+          connectTimeoutMs: config.websocketConnectTimeoutMs
+        });
+
+        wsCoordinator = new WebSocketSessionCoordinator(sessionStore);
+
+        wsCoordinator.onPermissionRequest(async (request) => {
+          console.log(`Permission requested: ${request.permission}`);
+          console.log(`Description: ${request.description || "(none)"}`);
+          return "denied";
+        });
+
+        await wsManager.connect();
+        await wsCoordinator.initialize(wsManager);
+
+        wsInitialized = true;
+        console.log("WebSocket coordinator initialized and ready");
+      }
+    } catch (error) {
+      console.error("Failed to initialize/reconnect WebSocket:", error);
+      if (!wsInitialized) {
+        // First-time failure — clean up so next attempt starts fresh
+        wsManager = null;
+        wsCoordinator = null;
+      }
+      throw error;
+    } finally {
+      wsConnectingPromise = null;
+    }
+  })();
+
+  return wsConnectingPromise;
 }
 
 app.get(config.healthEndpointPath, (_req, res) => {
@@ -317,7 +336,7 @@ if (process.env.NODE_ENV === "development") {
     }
 
     try {
-      if (!wsInitialized) {
+      if (!wsInitialized || !wsCoordinator?.isReady()) {
         await ensureWebSocketReady();
       }
 
@@ -428,7 +447,7 @@ if (process.env.NODE_ENV === "development") {
     }
 
     try {
-      if (!wsInitialized) {
+      if (!wsInitialized || !wsCoordinator?.isReady()) {
         await ensureWebSocketReady();
       }
 

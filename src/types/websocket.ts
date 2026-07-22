@@ -154,6 +154,10 @@ export interface WebSocketManagerOptions {
   authToken: string;
   connectTimeoutMs?: number;
   messageTimeoutMs?: number;
+  reconnect?: boolean;
+  reconnectDelayMs?: number;
+  reconnectMaxDelayMs?: number;
+  reconnectMaxAttempts?: number;
 }
 
 /**

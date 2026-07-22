@@ -120,6 +120,30 @@ export class SessionStore {
   }
 
   /**
+   * Reset session state so caller can recreate backend session after failures
+   */
+  public resetToNew(conversationKey: string): void {
+    const session = this.store.get(conversationKey);
+    if (session) {
+      session.sessionId = undefined;
+      session.sessionMode = undefined;
+      session.sessionState = "new";
+      session.initializedAt = undefined;
+      session.lastError = undefined;
+      session.lastSeenAt = Date.now();
+    }
+  }
+
+  /**
+   * Reset all sessions to "new" state (e.g. after backend reconnect)
+   */
+  public resetAll(): void {
+    for (const key of this.store.keys()) {
+      this.resetToNew(key);
+    }
+  }
+
+  /**
    * Get session size
    */
   public size(): number {

@@ -1,4 +1,5 @@
 import { WebSocketManager } from "./websocketManager";
+import { config } from "./config";
 import { SessionStore, SessionRecord } from "./sessionStore";
 import { StreamingResponseHandler } from "./streamingResponseHandler";
 import { PermissionRequestManager } from "./permissionRequestManager";
@@ -83,6 +84,25 @@ export class WebSocketSessionCoordinator {
       }
     });
 
+    // Re-initialize automatically after reconnection
+    this.manager.on("reconnected", async () => {
+      console.log("WebSocket reconnected - re-initializing handshake...");
+      this.isInitialized = false;
+
+      // Reset all existing sessions so they get fresh session IDs on the new backend
+      this.sessionStore.resetAll();
+
+      try {
+        const result = await this.manager!.initialize(this.protocolVersion);
+        this.handleInitializeResult(result);
+        this.isInitialized = true;
+        console.log("WebSocket re-initialization successful");
+      } catch (error) {
+        console.error("WebSocket re-initialization failed:", error);
+        // scheduleReconnect will retry the whole connection
+      }
+    });
+
     // Run initialize handshake
     try {
       const result = await this.manager.initialize(this.protocolVersion);
@@ -103,6 +123,21 @@ export class WebSocketSessionCoordinator {
     this.supportedAuthMethods = result.authMethods?.map(m => m.id) || [];
   }
 
+  private async applyDefaultSessionConfig(conversationKey: string, sessionId: string): Promise<void> {
+    const configOptions: Array<{ configId: string; value: string }> = [];
+
+    if (config.websocketAgentName) {
+      configOptions.push({ configId: "agent", value: config.websocketAgentName });
+    } else if (config.websocketModelName) {
+      // Backward-compatible fallback for backends that still expect model config.
+      configOptions.push({ configId: "model", value: config.websocketModelName });
+    }
+
+    for (const option of configOptions) {
+      await this.configureSession(conversationKey, sessionId, option.configId, option.value);
+    }
+  }
+
   /**
    * Create a new session for a conversation
    */
@@ -117,6 +152,8 @@ export class WebSocketSessionCoordinator {
 
       const result = await this.manager.sessionNew(cwd);
       const sessionId = result.sessionId;
+
+      await this.applyDefaultSessionConfig(conversationKey, sessionId);
 
       // Update session store
       this.sessionStore.setSessionId(conversationKey, sessionId, "new");
@@ -266,7 +303,7 @@ export class WebSocketSessionCoordinator {
    * Get or ensure session is initialized for a conversation
    */
   async ensureSession(conversationKey: string): Promise<string> {
-    const session = this.sessionStore.get(conversationKey);
+    let session = this.sessionStore.get(conversationKey);
 
     // Session already initialized and ready
     if (session?.sessionId && session.sessionState === "ready") {
@@ -282,7 +319,8 @@ export class WebSocketSessionCoordinator {
       } catch (e) {
         // Ignore cleanup errors
       }
-      this.sessionStore.getOrCreate(conversationKey); // Reset to new state
+      this.sessionStore.resetToNew(conversationKey);
+      session = this.sessionStore.get(conversationKey);
     }
 
     // Create new session
@@ -323,6 +361,22 @@ export class WebSocketSessionCoordinator {
    */
   getPermissionManager(): PermissionRequestManager {
     return this.permissionManager;
+  }
+
+  /**
+   * Re-run the initialize handshake without re-registering event listeners.
+   * Called when the WebSocket has reconnected but the protocol handshake needs to repeat.
+   */
+  async reInitializeHandshake(): Promise<void> {
+    if (!this.manager) {
+      throw new Error("No WebSocket manager attached");
+    }
+    this.isInitialized = false;
+    this.sessionStore.resetAll();
+    const result = await this.manager.initialize(this.protocolVersion);
+    this.handleInitializeResult(result);
+    this.isInitialized = true;
+    console.log("WebSocket re-initialization handshake successful");
   }
 
   /**

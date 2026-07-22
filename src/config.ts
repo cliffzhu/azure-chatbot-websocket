@@ -8,6 +8,8 @@ type AppConfig = {
   websocketUser: string;
   websocketAuthToken: string;
   websocketUrl: string;
+  websocketModelName: string;
+  websocketAgentName: string;
   websocketConnectTimeoutMs: number;
   healthEndpointPath: string;
   jwtOnlyAuthEnabled: boolean;
@@ -107,6 +109,8 @@ export const config: AppConfig = {
   websocketUser: process.env.WEBSOCKET_USER ?? "token",
   websocketAuthToken: mustGet("WEBSOCKET_AUTH_TOKEN"),
   websocketUrl: mustGet("WEBSOCKET_URL"),
+  websocketModelName: (process.env.WEBSOCKET_MODEL_NAME ?? "").trim(),
+  websocketAgentName: (process.env.WEBSOCKET_AGENT_NAME ?? "").trim(),
   websocketConnectTimeoutMs: asNumber("WEBSOCKET_CONNECT_TIMEOUT_MS", 10_000),
   healthEndpointPath: process.env.HEALTH_ENDPOINT_PATH ?? "/healthz",
   jwtOnlyAuthEnabled,
