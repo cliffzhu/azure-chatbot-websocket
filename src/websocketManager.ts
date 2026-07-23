@@ -93,6 +93,7 @@ export class WebSocketManager {
           this.isConnected = false;
           this.ws = null;
           console.log("WebSocket disconnected");
+          this.emit("disconnected", {});
           if (!this.intentionalDisconnect && this.options.reconnect) {
             this.scheduleReconnect();
           }

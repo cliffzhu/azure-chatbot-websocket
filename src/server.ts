@@ -347,6 +347,13 @@ async function ensureWebSocketReady(): Promise<void> {
           return "denied";
         });
 
+        wsManager.on("disconnected", () => {
+          console.log("WebSocket disconnected, will reconnect on next message");
+          wsInitialized = false;
+          wsManager = null;
+          wsCoordinator = null;
+        });
+
         await wsManager.connect();
         await wsCoordinator.initialize(wsManager);
 
