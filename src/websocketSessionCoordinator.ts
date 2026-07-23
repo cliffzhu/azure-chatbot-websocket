@@ -50,16 +50,36 @@ export class WebSocketSessionCoordinator {
 
     // Register event listeners for server-pushed messages
     this.manager.on("session/update", (update: SessionUpdate) => {
-      // Route to active session's response handler if available
-      for (const [conversationKey, handler] of this.responseHandlers.entries()) {
-        handler.handleUpdate(update);
+      // Preferred routing: backend supplies sessionId for isolation.
+      if (update.sessionId) {
+        const conversationKey = this.sessionToConversationMap.get(update.sessionId);
+        if (conversationKey) {
+          const handler = this.responseHandlers.get(conversationKey);
+          if (handler) {
+            handler.handleUpdate(update);
+          }
+
+          if (this.updateCallback) {
+            this.updateCallback(conversationKey, update);
+          }
+        } else {
+          console.warn(`No conversation mapping found for sessionId=${update.sessionId}`);
+        }
+
+        return;
       }
 
-      // Also call external callback if registered
-      if (this.updateCallback) {
-        // Note: without sessionId in the update, we route to all active handlers
-        // In practice, only one should be active at a time
-        this.updateCallback("", update);
+      // Legacy fallback: older backends may not send sessionId.
+      // Keep backward compatibility, but warn because concurrent
+      // streaming isolation cannot be guaranteed in this mode.
+      console.warn("session/update missing sessionId; using legacy broadcast routing");
+
+      for (const [conversationKey, handler] of this.responseHandlers.entries()) {
+        handler.handleUpdate(update);
+
+        if (this.updateCallback) {
+          this.updateCallback(conversationKey, update);
+        }
       }
     });
 
@@ -157,6 +177,8 @@ export class WebSocketSessionCoordinator {
 
       // Update session store
       this.sessionStore.setSessionId(conversationKey, sessionId, "new");
+      this.sessionToConversationMap.set(sessionId, conversationKey);
+
       this.sessionStore.setCapabilities(conversationKey, {
         authMethods: this.supportedAuthMethods,
         loadSession: true,
@@ -184,6 +206,7 @@ export class WebSocketSessionCoordinator {
 
       // Update session store
       this.sessionStore.setSessionId(conversationKey, result.sessionId, "loaded");
+      this.sessionToConversationMap.set(result.sessionId, conversationKey);
 
       console.log(`Session loaded: ${result.sessionId} for ${conversationKey}`);
       return result.sessionId;
@@ -206,6 +229,7 @@ export class WebSocketSessionCoordinator {
 
       // Update session store
       this.sessionStore.setSessionId(conversationKey, result.sessionId, "resumed");
+      this.sessionToConversationMap.set(result.sessionId, conversationKey);
 
       console.log(`Session resumed: ${result.sessionId} for ${conversationKey}`);
       return result.sessionId;

@@ -23,6 +23,7 @@ type AppConfig = {
   jwksCacheTtlSeconds: number;
   jwtClockSkewSeconds: number;
   outgoingActivityLogEnabled: boolean;
+  streamingResponsesEnabled: boolean;
 };
 
 function mustGet(name: string): string {
@@ -123,5 +124,6 @@ export const config: AppConfig = {
   jwtAllowedIssuers,
   jwksCacheTtlSeconds: asNumber("JWKS_CACHE_TTL_SECONDS", 3600),
   jwtClockSkewSeconds: asNumber("JWT_CLOCK_SKEW_SECONDS", 300),
-  outgoingActivityLogEnabled: asBoolean("OUTGOING_ACTIVITY_LOG_ENABLED", true)
+  outgoingActivityLogEnabled: asBoolean("OUTGOING_ACTIVITY_LOG_ENABLED", true),
+  streamingResponsesEnabled: asBoolean("STREAMING_RESPONSES_ENABLED", false)
 };

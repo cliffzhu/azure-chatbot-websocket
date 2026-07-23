@@ -111,6 +111,7 @@ export interface SessionPromptResult {
  * Session Update (Server-pushed message)
  */
 export interface SessionUpdate {
+  sessionId?: string;
   sessionUpdate:
     | "agent_message_chunk"
     | "agent_message_completion"

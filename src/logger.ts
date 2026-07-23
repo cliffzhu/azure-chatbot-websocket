@@ -135,6 +135,39 @@ export function payloadLogger(req: Request, res: Response, next: NextFunction): 
   next();
 }
 
+type OutgoingActivityLogParams = {
+  source: "api/messages" | "api/dev/messages";
+  channelId: string;
+  conversationId: string;
+  userId: string;
+  status: "attempt" | "success" | "failure";
+  text: string;
+  stopReason?: string;
+  error?: unknown;
+};
+
+/**
+ * Record Bot Framework outgoing activity events that do not flow through res.json.
+ */
+export function logOutgoingActivity(params: OutgoingActivityLogParams): void {
+  writeLine({
+    ts: new Date().toISOString(),
+    direction: "outgoing-activity",
+    source: params.source,
+    channelId: params.channelId,
+    conversationId: params.conversationId,
+    userId: params.userId,
+    status: params.status,
+    textLength: params.text.length,
+    stopReason: params.stopReason ?? "n/a",
+    body: {
+      type: "message",
+      text: params.text
+    },
+    error: params.error ?? null
+  });
+}
+
 // ─── Close on process exit ────────────────────────────────────────────────────
 
 function closeLogger(): void {
