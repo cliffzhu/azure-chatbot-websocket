@@ -41,6 +41,7 @@ Required environment variables:
 WEBSOCKET_URL=ws://your-backend:8080/ws
 WEBSOCKET_USER=token
 WEBSOCKET_AUTH_TOKEN=your_auth_token_here
+WEBSOCKET_AGENT_NAME=your_agent_name
 
 # Teams Bot Configuration
 MicrosoftAppType=SingleTenant
@@ -52,6 +53,10 @@ MicrosoftAppTenantId=your_tenant_id
 WEBSOCKET_CONNECT_TIMEOUT_MS=10000
 WEBSOCKET_MESSAGE_TIMEOUT_MS=30000
 ```
+
+Optional session defaults:
+- `WEBSOCKET_AGENT_NAME`: preferred, applies `session/set_config_option` with `configId=agent` after `session/new`.
+- `WEBSOCKET_MODEL_NAME`: fallback only, used when `WEBSOCKET_AGENT_NAME` is not set.
 
 ### 3. Start Docker Container
 
@@ -67,6 +72,21 @@ curl http://localhost:3978/healthz
 
 # Stop the container
 docker-compose down
+```
+
+### Docker Lifecycle Commands
+
+Use these commands when you need to stop, rebuild, or re-run the container:
+
+```bash
+# Shut down the running container
+docker compose down
+
+# Rebuild the image and start the container again
+docker compose up -d --build
+
+# Re-run the existing image without rebuilding
+docker compose up -d
 ```
 
 ## Deployment Checklist

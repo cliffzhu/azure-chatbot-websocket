@@ -37,11 +37,16 @@ export class WebSocketManager {
   private messageBuffer: string = "";
   private eventListeners: Map<string, Function[]> = new Map();
   private isConnected: boolean = false;
+  private intentionalDisconnect: boolean = false;
+  private reconnectAttempts: number = 0;
 
   constructor(options: WebSocketManagerOptions) {
     this.options = {
       connectTimeoutMs: 10000,
       messageTimeoutMs: 30000,
+      reconnect: true,
+      reconnectDelayMs: 2000,
+      reconnectMaxDelayMs: 30000,
       ...options
     };
   }
@@ -86,8 +91,12 @@ export class WebSocketManager {
 
         this.ws.on("close", () => {
           this.isConnected = false;
+          this.ws = null;
           console.log("WebSocket disconnected");
           this.emit("disconnected", {});
+          if (!this.intentionalDisconnect && this.options.reconnect) {
+            this.scheduleReconnect();
+          }
         });
 
         this.ws.on("error", (error: Error) => {
@@ -106,6 +115,7 @@ export class WebSocketManager {
    * Disconnect from the WebSocket
    */
   async disconnect(): Promise<void> {
+    this.intentionalDisconnect = true;
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -367,5 +377,35 @@ export class WebSocketManager {
    */
   isReady(): boolean {
     return this.isConnected && this.ws !== null;
+  }
+
+  /**
+   * Schedule a reconnection attempt with exponential backoff
+   */
+  private scheduleReconnect(): void {
+    const maxAttempts = this.options.reconnectMaxAttempts ?? Infinity;
+    if (this.reconnectAttempts >= maxAttempts) {
+      console.error(`WebSocket reconnect abandoned after ${this.reconnectAttempts} attempt(s)`);
+      return;
+    }
+
+    const baseDelay = this.options.reconnectDelayMs ?? 2000;
+    const maxDelay = this.options.reconnectMaxDelayMs ?? 30000;
+    const delay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), maxDelay);
+    this.reconnectAttempts++;
+
+    console.log(`WebSocket reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})...`);
+
+    setTimeout(async () => {
+      try {
+        await this.connect();
+        this.reconnectAttempts = 0;
+        console.log("WebSocket reconnected successfully");
+        this.emit("reconnected", {});
+      } catch (error) {
+        console.error(`WebSocket reconnect attempt ${this.reconnectAttempts} failed:`, error);
+        this.scheduleReconnect();
+      }
+    }, delay);
   }
 }

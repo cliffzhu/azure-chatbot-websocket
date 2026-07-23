@@ -111,6 +111,7 @@ export interface SessionPromptResult {
  * Session Update (Server-pushed message)
  */
 export interface SessionUpdate {
+  sessionId?: string;
   sessionUpdate:
     | "agent_message_chunk"
     | "agent_message_completion"
@@ -159,6 +160,10 @@ export interface WebSocketManagerOptions {
   authToken: string;
   connectTimeoutMs?: number;
   messageTimeoutMs?: number;
+  reconnect?: boolean;
+  reconnectDelayMs?: number;
+  reconnectMaxDelayMs?: number;
+  reconnectMaxAttempts?: number;
 }
 
 /**

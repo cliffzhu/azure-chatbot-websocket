@@ -96,6 +96,11 @@ function classifyJwtError(error: unknown, token?: string): string {
 }
 
 export async function jwtAuthMiddleware(req: VerifiedRequest, res: Response, next: NextFunction): Promise<void> {
+  if (req.method === "OPTIONS") {
+    next();
+    return;
+  }
+
   if (!config.jwtOnlyAuthEnabled) {
     next();
     return;

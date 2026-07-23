@@ -1,4 +1,5 @@
 import { WebSocketManager } from "./websocketManager";
+import { config } from "./config";
 import { SessionStore, SessionRecord } from "./sessionStore";
 import { StreamingResponseHandler } from "./streamingResponseHandler";
 import { PermissionRequestManager } from "./permissionRequestManager";
@@ -49,16 +50,36 @@ export class WebSocketSessionCoordinator {
 
     // Register event listeners for server-pushed messages
     this.manager.on("session/update", (update: SessionUpdate) => {
-      // Route to active session's response handler if available
-      for (const [conversationKey, handler] of this.responseHandlers.entries()) {
-        handler.handleUpdate(update);
+      // Preferred routing: backend supplies sessionId for isolation.
+      if (update.sessionId) {
+        const conversationKey = this.sessionToConversationMap.get(update.sessionId);
+        if (conversationKey) {
+          const handler = this.responseHandlers.get(conversationKey);
+          if (handler) {
+            handler.handleUpdate(update);
+          }
+
+          if (this.updateCallback) {
+            this.updateCallback(conversationKey, update);
+          }
+        } else {
+          console.warn(`No conversation mapping found for sessionId=${update.sessionId}`);
+        }
+
+        return;
       }
 
-      // Also call external callback if registered
-      if (this.updateCallback) {
-        // Note: without sessionId in the update, we route to all active handlers
-        // In practice, only one should be active at a time
-        this.updateCallback("", update);
+      // Legacy fallback: older backends may not send sessionId.
+      // Keep backward compatibility, but warn because concurrent
+      // streaming isolation cannot be guaranteed in this mode.
+      console.warn("session/update missing sessionId; using legacy broadcast routing");
+
+      for (const [conversationKey, handler] of this.responseHandlers.entries()) {
+        handler.handleUpdate(update);
+
+        if (this.updateCallback) {
+          this.updateCallback(conversationKey, update);
+        }
       }
     });
 
@@ -83,6 +104,25 @@ export class WebSocketSessionCoordinator {
       }
     });
 
+    // Re-initialize automatically after reconnection
+    this.manager.on("reconnected", async () => {
+      console.log("WebSocket reconnected - re-initializing handshake...");
+      this.isInitialized = false;
+
+      // Reset all existing sessions so they get fresh session IDs on the new backend
+      this.sessionStore.resetAll();
+
+      try {
+        const result = await this.manager!.initialize(this.protocolVersion);
+        this.handleInitializeResult(result);
+        this.isInitialized = true;
+        console.log("WebSocket re-initialization successful");
+      } catch (error) {
+        console.error("WebSocket re-initialization failed:", error);
+        // scheduleReconnect will retry the whole connection
+      }
+    });
+
     // Run initialize handshake
     try {
       const result = await this.manager.initialize(this.protocolVersion);
@@ -103,6 +143,21 @@ export class WebSocketSessionCoordinator {
     this.supportedAuthMethods = result.authMethods?.map(m => m.id) || [];
   }
 
+  private async applyDefaultSessionConfig(conversationKey: string, sessionId: string): Promise<void> {
+    const configOptions: Array<{ configId: string; value: string }> = [];
+
+    if (config.websocketAgentName) {
+      configOptions.push({ configId: "agent", value: config.websocketAgentName });
+    } else if (config.websocketModelName) {
+      // Backward-compatible fallback for backends that still expect model config.
+      configOptions.push({ configId: "model", value: config.websocketModelName });
+    }
+
+    for (const option of configOptions) {
+      await this.configureSession(conversationKey, sessionId, option.configId, option.value);
+    }
+  }
+
   /**
    * Create a new session for a conversation
    */
@@ -118,8 +173,12 @@ export class WebSocketSessionCoordinator {
       const result = await this.manager.sessionNew(cwd);
       const sessionId = result.sessionId;
 
+      await this.applyDefaultSessionConfig(conversationKey, sessionId);
+
       // Update session store
       this.sessionStore.setSessionId(conversationKey, sessionId, "new");
+      this.sessionToConversationMap.set(sessionId, conversationKey);
+
       this.sessionStore.setCapabilities(conversationKey, {
         authMethods: this.supportedAuthMethods,
         loadSession: true,
@@ -147,6 +206,7 @@ export class WebSocketSessionCoordinator {
 
       // Update session store
       this.sessionStore.setSessionId(conversationKey, result.sessionId, "loaded");
+      this.sessionToConversationMap.set(result.sessionId, conversationKey);
 
       console.log(`Session loaded: ${result.sessionId} for ${conversationKey}`);
       return result.sessionId;
@@ -169,6 +229,7 @@ export class WebSocketSessionCoordinator {
 
       // Update session store
       this.sessionStore.setSessionId(conversationKey, result.sessionId, "resumed");
+      this.sessionToConversationMap.set(result.sessionId, conversationKey);
 
       console.log(`Session resumed: ${result.sessionId} for ${conversationKey}`);
       return result.sessionId;
@@ -266,7 +327,7 @@ export class WebSocketSessionCoordinator {
    * Get or ensure session is initialized for a conversation
    */
   async ensureSession(conversationKey: string): Promise<string> {
-    const session = this.sessionStore.get(conversationKey);
+    let session = this.sessionStore.get(conversationKey);
 
     // Session already initialized and ready
     if (session?.sessionId && session.sessionState === "ready") {
@@ -282,7 +343,8 @@ export class WebSocketSessionCoordinator {
       } catch (e) {
         // Ignore cleanup errors
       }
-      this.sessionStore.getOrCreate(conversationKey); // Reset to new state
+      this.sessionStore.resetToNew(conversationKey);
+      session = this.sessionStore.get(conversationKey);
     }
 
     // Create new session
@@ -323,6 +385,22 @@ export class WebSocketSessionCoordinator {
    */
   getPermissionManager(): PermissionRequestManager {
     return this.permissionManager;
+  }
+
+  /**
+   * Re-run the initialize handshake without re-registering event listeners.
+   * Called when the WebSocket has reconnected but the protocol handshake needs to repeat.
+   */
+  async reInitializeHandshake(): Promise<void> {
+    if (!this.manager) {
+      throw new Error("No WebSocket manager attached");
+    }
+    this.isInitialized = false;
+    this.sessionStore.resetAll();
+    const result = await this.manager.initialize(this.protocolVersion);
+    this.handleInitializeResult(result);
+    this.isInitialized = true;
+    console.log("WebSocket re-initialization handshake successful");
   }
 
   /**

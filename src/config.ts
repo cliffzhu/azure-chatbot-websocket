@@ -8,6 +8,8 @@ type AppConfig = {
   websocketUser: string;
   websocketAuthToken: string;
   websocketUrl: string;
+  websocketModelName: string;
+  websocketAgentName: string;
   websocketConnectTimeoutMs: number;
   healthEndpointPath: string;
   jwtOnlyAuthEnabled: boolean;
@@ -21,6 +23,7 @@ type AppConfig = {
   jwksCacheTtlSeconds: number;
   jwtClockSkewSeconds: number;
   outgoingActivityLogEnabled: boolean;
+  streamingResponsesEnabled: boolean;
 };
 
 function mustGet(name: string): string {
@@ -107,6 +110,8 @@ export const config: AppConfig = {
   websocketUser: process.env.WEBSOCKET_USER ?? "token",
   websocketAuthToken: mustGet("WEBSOCKET_AUTH_TOKEN"),
   websocketUrl: mustGet("WEBSOCKET_URL"),
+  websocketModelName: (process.env.WEBSOCKET_MODEL_NAME ?? "").trim(),
+  websocketAgentName: (process.env.WEBSOCKET_AGENT_NAME ?? "").trim(),
   websocketConnectTimeoutMs: asNumber("WEBSOCKET_CONNECT_TIMEOUT_MS", 10_000),
   healthEndpointPath: process.env.HEALTH_ENDPOINT_PATH ?? "/healthz",
   jwtOnlyAuthEnabled,
@@ -119,5 +124,6 @@ export const config: AppConfig = {
   jwtAllowedIssuers,
   jwksCacheTtlSeconds: asNumber("JWKS_CACHE_TTL_SECONDS", 3600),
   jwtClockSkewSeconds: asNumber("JWT_CLOCK_SKEW_SECONDS", 300),
-  outgoingActivityLogEnabled: asBoolean("OUTGOING_ACTIVITY_LOG_ENABLED", true)
+  outgoingActivityLogEnabled: asBoolean("OUTGOING_ACTIVITY_LOG_ENABLED", true),
+  streamingResponsesEnabled: asBoolean("STREAMING_RESPONSES_ENABLED", false)
 };

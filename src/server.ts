@@ -1,5 +1,6 @@
 import express from "express";
 import {
+  Activity,
   ActivityTypes,
   CloudAdapter,
   ConfigurationBotFrameworkAuthentication,
@@ -7,7 +8,7 @@ import {
 } from "botbuilder";
 import { config } from "./config";
 import { jwtAuthMiddleware } from "./jwtAuthMiddleware";
-import { payloadLogger } from "./logger";
+import { logOutgoingActivity, payloadLogger } from "./logger";
 import { SessionStore } from "./sessionStore";
 import { WebSocketManager } from "./websocketManager";
 import { WebSocketSessionCoordinator } from "./websocketSessionCoordinator";
@@ -21,24 +22,23 @@ const sessionStore = new SessionStore();
 let wsManager: WebSocketManager | null = null;
 let wsCoordinator: WebSocketSessionCoordinator | null = null;
 let wsInitialized = false;
+let wsConnectingPromise: Promise<void> | null = null;
 
 let adapter: CloudAdapter | null = null;
 
-if (!config.jwtOnlyAuthEnabled) {
-  const botFrameworkAuthentication = new ConfigurationBotFrameworkAuthentication(
-    process.env as Record<string, string>
-  );
-  adapter = new CloudAdapter(botFrameworkAuthentication);
+const botFrameworkAuthentication = new ConfigurationBotFrameworkAuthentication(
+  process.env as Record<string, string>
+);
+adapter = new CloudAdapter(botFrameworkAuthentication);
 
-  adapter.onTurnError = async (context: TurnContext, err: Error) => {
-    console.error("Unhandled bot error", err);
-    await sendActivityWithLog(
-      context,
-      "Something went wrong. Please try again.",
-      "api/messages"
-    );
-  };
-}
+adapter.onTurnError = async (context: TurnContext, err: Error) => {
+  console.error("Unhandled bot error", err);
+  await sendActivityWithLog(
+    context,
+    "Something went wrong. Please try again.",
+    "api/messages"
+  );
+};
 
 type MessageRoutingInput = {
   channelId: string;
@@ -46,6 +46,16 @@ type MessageRoutingInput = {
   userId: string;
   userText: string;
 };
+
+const DISABLED_TOOLS_PREAMBLE = "Info: Disabled tools: apply_patch, bash, list_bash, read_bash, session_store_sql, sql, stop_bash, task, web_fetch, write_agent";
+
+function sanitizeBackendReplyText(text: string): string {
+  if (!text.startsWith(DISABLED_TOOLS_PREAMBLE)) {
+    return text;
+  }
+
+  return text.slice(DISABLED_TOOLS_PREAMBLE.length).trimStart();
+}
 
 async function sendActivityWithLog(
   context: TurnContext,
@@ -66,6 +76,16 @@ async function sendActivityWithLog(
       textLength: text.length,
       stopReason: stopReason ?? "n/a"
     });
+
+    logOutgoingActivity({
+      source,
+      channelId,
+      conversationId,
+      userId,
+      status: "attempt",
+      text,
+      stopReason
+    });
   }
 
   try {
@@ -79,6 +99,16 @@ async function sendActivityWithLog(
         textLength: text.length,
         stopReason: stopReason ?? "n/a"
       });
+
+      logOutgoingActivity({
+        source,
+        channelId,
+        conversationId,
+        userId,
+        status: "success",
+        text,
+        stopReason
+      });
     }
   } catch (error) {
     console.error("[outgoing] sendActivity failed", {
@@ -90,6 +120,110 @@ async function sendActivityWithLog(
       stopReason: stopReason ?? "n/a",
       error
     });
+
+    logOutgoingActivity({
+      source,
+      channelId,
+      conversationId,
+      userId,
+      status: "failure",
+      text,
+      stopReason,
+      error: error instanceof Error ? error.message : String(error)
+    });
+
+    throw error;
+  }
+}
+
+async function sendJwtOnlyActivityWithLog(
+  activity: Activity,
+  text: string,
+  source: "api/messages" | "api/dev/messages",
+  stopReason?: string
+): Promise<void> {
+  const channelId = activity.channelId ?? "unknown-channel";
+  const conversationId = activity.conversation?.id ?? "unknown-conversation";
+  const userId = activity.from?.id ?? "unknown-user";
+
+  if (config.outgoingActivityLogEnabled) {
+    console.info("[outgoing] sendActivity attempt", {
+      source,
+      channelId,
+      conversationId,
+      userId,
+      textLength: text.length,
+      stopReason: stopReason ?? "n/a"
+    });
+
+    logOutgoingActivity({
+      source,
+      channelId,
+      conversationId,
+      userId,
+      status: "attempt",
+      text,
+      stopReason
+    });
+  }
+
+  if (!adapter) {
+    throw new Error("CloudAdapter not initialized");
+  }
+
+  const botAppId = process.env.MicrosoftAppId ?? "";
+  if (!botAppId) {
+    throw new Error("MicrosoftAppId is required to send channel activities in JWT-only mode");
+  }
+
+  try {
+    const reference = TurnContext.getConversationReference(activity);
+    await adapter.continueConversationAsync(botAppId, reference, async (proactiveContext) => {
+      await proactiveContext.sendActivity(text);
+    });
+
+    if (config.outgoingActivityLogEnabled) {
+      console.info("[outgoing] sendActivity success", {
+        source,
+        channelId,
+        conversationId,
+        userId,
+        textLength: text.length,
+        stopReason: stopReason ?? "n/a"
+      });
+
+      logOutgoingActivity({
+        source,
+        channelId,
+        conversationId,
+        userId,
+        status: "success",
+        text,
+        stopReason
+      });
+    }
+  } catch (error) {
+    console.error("[outgoing] sendActivity failed", {
+      source,
+      channelId,
+      conversationId,
+      userId,
+      textLength: text.length,
+      stopReason: stopReason ?? "n/a",
+      error
+    });
+
+    logOutgoingActivity({
+      source,
+      channelId,
+      conversationId,
+      userId,
+      status: "failure",
+      text,
+      stopReason,
+      error: error instanceof Error ? error.message : String(error)
+    });
+
     throw error;
   }
 }
@@ -104,8 +238,8 @@ async function routeMessageToBackend(input: MessageRoutingInput): Promise<{ text
     };
   }
 
-  // Ensure WebSocket is ready
-  if (!wsInitialized) {
+  // Ensure WebSocket is ready and connected
+  if (!wsInitialized || !wsCoordinator?.isReady()) {
     await ensureWebSocketReady();
   }
 
@@ -129,6 +263,8 @@ async function routeMessageToBackend(input: MessageRoutingInput): Promise<{ text
     }
   }
 
+  replyMessage = sanitizeBackendReplyText(replyMessage);
+
   return {
     text: replyMessage,
     stopReason: response.stopReason
@@ -139,57 +275,105 @@ async function buildConversationReply(input: MessageRoutingInput): Promise<{ tex
   return routeMessageToBackend(input);
 }
 
+async function sendStreamingTypingIndicators(context: TurnContext): Promise<() => void> {
+  if (!config.streamingResponsesEnabled) {
+    return () => {};
+  }
+
+  let active = true;
+
+  const sendTyping = async () => {
+    if (!active) {
+      return;
+    }
+
+    try {
+      await context.sendActivity({ type: ActivityTypes.Typing });
+    } catch (error) {
+      console.error("Failed to send typing indicator", error);
+    }
+  };
+
+  await sendTyping();
+
+  const interval = setInterval(() => {
+    void sendTyping();
+  }, 2500);
+
+  return () => {
+    active = false;
+    clearInterval(interval);
+  };
+}
+
 /**
- * Initialize WebSocket connection on first use
+ * Initialize or reconnect the WebSocket on demand.
+ * Serialized via wsConnectingPromise so concurrent callers all wait for the same attempt.
  */
 async function ensureWebSocketReady(): Promise<void> {
-  if (wsInitialized) {
+  // Already ready — fast path
+  if (wsInitialized && wsCoordinator?.isReady()) {
     return;
   }
 
-  try {
-    wsManager = new WebSocketManager({
-      url: config.websocketUrl,
-      username: config.websocketUser,
-      authToken: config.websocketAuthToken,
-      connectTimeoutMs: config.websocketConnectTimeoutMs
-    });
-
-    wsCoordinator = new WebSocketSessionCoordinator(sessionStore);
-
-    // Register permission request handler
-    // For now, deny all permission requests by default (secure approach)
-    // In production, this could integrate with Teams to prompt the user
-    wsCoordinator.onPermissionRequest(async (request) => {
-      console.log(`Permission requested: ${request.permission}`);
-      console.log(`Description: ${request.description || "(none)"}`);
-
-      // Deny by default for security
-      // This can be customized to approve specific permissions or integrate with user UI
-      return "denied";
-    });
-
-    // Connect and initialize
-    await wsManager.connect();
-    await wsCoordinator.initialize(wsManager);
-
-    // Listen for disconnection to reset initialization flag
-    wsManager.on("disconnected", () => {
-      console.log("WebSocket disconnected, will reconnect on next message");
-      wsInitialized = false;
-      wsManager = null;
-      wsCoordinator = null;
-    });
-
-    wsInitialized = true;
-    console.log("WebSocket coordinator initialized and ready");
-  } catch (error) {
-    console.error("Failed to initialize WebSocket coordinator:", error);
-    wsInitialized = false;
-    wsManager = null;
-    wsCoordinator = null;
-    throw error;
+  // Serialize concurrent callers onto a single reconnect attempt
+  if (wsConnectingPromise) {
+    return wsConnectingPromise;
   }
+
+  wsConnectingPromise = (async () => {
+    try {
+      if (wsInitialized && wsManager && wsCoordinator) {
+        // Manager + coordinator already exist (background reconnect loop is active).
+        // Short-circuit: connect immediately and re-run the handshake.
+        console.log("WebSocket not ready — reconnecting on demand...");
+        await wsManager.connect();
+        await wsCoordinator.reInitializeHandshake();
+        console.log("WebSocket reconnected on demand");
+      } else {
+        // First-time initialization
+        wsManager = new WebSocketManager({
+          url: config.websocketUrl,
+          username: config.websocketUser,
+          authToken: config.websocketAuthToken,
+          connectTimeoutMs: config.websocketConnectTimeoutMs
+        });
+
+        wsCoordinator = new WebSocketSessionCoordinator(sessionStore);
+
+        wsCoordinator.onPermissionRequest(async (request) => {
+          console.log(`Permission requested: ${request.permission}`);
+          console.log(`Description: ${request.description || "(none)"}`);
+          return "denied";
+        });
+
+        wsManager.on("disconnected", () => {
+          console.log("WebSocket disconnected, will reconnect on next message");
+          wsInitialized = false;
+          wsManager = null;
+          wsCoordinator = null;
+        });
+
+        await wsManager.connect();
+        await wsCoordinator.initialize(wsManager);
+
+        wsInitialized = true;
+        console.log("WebSocket coordinator initialized and ready");
+      }
+    } catch (error) {
+      console.error("Failed to initialize/reconnect WebSocket:", error);
+      if (!wsInitialized) {
+        // First-time failure — clean up so next attempt starts fresh
+        wsManager = null;
+        wsCoordinator = null;
+      }
+      throw error;
+    } finally {
+      wsConnectingPromise = null;
+    }
+  })();
+
+  return wsConnectingPromise;
 }
 
 app.get(config.healthEndpointPath, (_req, res) => {
@@ -202,9 +386,9 @@ app.get(config.healthEndpointPath, (_req, res) => {
 
 app.use(jwtAuthMiddleware);
 
-app.post("/api/messages", (req, res) => {
+app.post("/api/messages", async (req, res) => {
   if (config.jwtOnlyAuthEnabled) {
-    const activity = req.body;
+    const activity = req.body as Activity;
 
     if (!activity?.type) {
       res.status(400).json({ error: "Activity type is required" });
@@ -233,20 +417,36 @@ app.post("/api/messages", (req, res) => {
     const conversationId = activity.conversation?.id ?? "jwt-only-conversation";
     const userId = activity.from?.id ?? "jwt-only-user";
 
-    routeMessageToBackend({ channelId, conversationId, userId, userText })
-      .then((reply) => {
-        res.status(200).json({ text: reply.text, stopReason: reply.stopReason });
-      })
-      .catch((error) => {
-        console.error("[JWT-ONLY] Message endpoint error", {
-          error,
-          channelId,
-          conversationId,
-          userId
-        });
-        const message = error instanceof Error ? error.message : String(error);
-        res.status(500).json({ error: message });
+    try {
+      const reply = await routeMessageToBackend({ channelId, conversationId, userId, userText });
+      await sendJwtOnlyActivityWithLog(activity, reply.text, "api/messages", reply.stopReason);
+      // Acknowledge the incoming activity; the user-visible reply is sent as a channel activity.
+      res.status(200).json({});
+    } catch (error) {
+      console.error("[JWT-ONLY] Message endpoint error", {
+        error,
+        channelId,
+        conversationId,
+        userId
       });
+
+      let errorMessage = "I cannot reach the backend service right now. Please try again shortly.";
+      if (error instanceof Error) {
+        if (error.message.includes("timeout")) {
+          errorMessage = "The backend service is not responding. Please try again.";
+        } else if (error.message.includes("not initialized")) {
+          errorMessage = "Service initialization failed. Please try again.";
+        }
+      }
+
+      try {
+        await sendJwtOnlyActivityWithLog(activity, errorMessage, "api/messages");
+        res.status(200).json({});
+      } catch (sendError) {
+        const message = sendError instanceof Error ? sendError.message : String(sendError);
+        res.status(500).json({ error: message });
+      }
+    }
     return;
   }
 
@@ -264,6 +464,7 @@ app.post("/api/messages", (req, res) => {
     const conversationId = context.activity.conversation?.id ?? "unknown-conversation";
     const userId = context.activity.from?.id ?? "unknown-user";
     const userText = (context.activity.text ?? "").trim();
+    const stopStreamingIndicators = await sendStreamingTypingIndicators(context);
 
     try {
       const reply = await routeMessageToBackend({
@@ -302,6 +503,8 @@ app.post("/api/messages", (req, res) => {
         errorMessage,
         "api/messages"
       );
+    } finally {
+      stopStreamingIndicators();
     }
   });
 });
@@ -325,7 +528,7 @@ if (process.env.NODE_ENV === "development") {
     }
 
     try {
-      if (!wsInitialized) {
+      if (!wsInitialized || !wsCoordinator?.isReady()) {
         await ensureWebSocketReady();
       }
 
@@ -404,6 +607,8 @@ if (process.env.NODE_ENV === "development") {
           return;
         }
 
+        const stopStreamingIndicators = await sendStreamingTypingIndicators(context);
+
         try {
           const reply = await buildConversationReply({
             channelId,
@@ -430,13 +635,15 @@ if (process.env.NODE_ENV === "development") {
             message,
             "api/dev/messages"
           );
+        } finally {
+          stopStreamingIndicators();
         }
       });
       return;
     }
 
     try {
-      if (!wsInitialized) {
+      if (!wsInitialized || !wsCoordinator?.isReady()) {
         await ensureWebSocketReady();
       }
 
